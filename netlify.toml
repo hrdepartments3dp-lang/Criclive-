@@ -1,0 +1,9 @@
+[build]
+  # Nothing to "build" — this is a single static HTML file plus the
+  # serverless functions folder. Netlify just needs to know where to
+  # publish from and where the functions live.
+  publish = "."
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
