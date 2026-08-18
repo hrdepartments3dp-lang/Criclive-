@@ -1,5 +1,5 @@
 // Netlify Function — ONE file that proxies all 4 real data providers
-// (CricAPI, Cricbuzz/RapidAPI, NewsData.io, YouTube Data API v3).
+// (CricAPI, Big Balls Sports Data, NewsData.io, YouTube Data API v3).
 //
 // Real keys are read from Netlify's environment variables and attached
 // server-side — the browser only ever calls this app's own domain
@@ -8,19 +8,41 @@
 //
 // Setup (Netlify dashboard → Site configuration → Environment variables):
 //   CRICAPI_KEY   — free key from https://cricketdata.org
-//   CRICBUZZ_KEY  — RapidAPI key for "Cricbuzz Cricket"
+//   BIGBALLS_KEY  — free key from https://bigballsdata.com (Dashboard → Keys,
+//                   looks like bbs_live_...)
 //   NEWSDATA_KEY  — free key from https://newsdata.io
 //   YOUTUBE_KEY   — YouTube Data API v3 key (Google Cloud Console)
 // Then redeploy so the function picks up the new variables.
 
-const CRICBUZZ_HOST = 'cricbuzz-cricket.p.rapidapi.com';
-const CRICBUZZ_PATHS = {
-  live: '/matches/v1/live',
-  recent: '/matches/v1/recent',
-  upcoming: '/matches/v1/upcoming'
-};
 const CRICAPI_ENDPOINTS = new Set(['currentMatches', 'matches', 'series', 'players']);
 const YT_BASE = 'https://www.googleapis.com/youtube/v3';
+
+// ---- Big Balls Sports Data (generic /v1/matches, sport is a query param) ----
+// Docs (quickstart, verified from actual site): sport isn't in the path —
+// every sport shares the same routes:
+//   GET /v1/sports              — list supported sport slugs
+//   GET /v1/matches             — matches, filter with ?sport=&league=&status=&limit=
+//   GET /v1/matches/:id         — single match (id comes from a /v1/matches row)
+//   GET /v1/players             — filter with ?name=
+//   GET /v1/players/:id         — needs ?sport=
+//   GET /v1/teams                — filter with ?sport=
+//   GET /v1/teams/:id            — needs ?sport=
+// (Earlier version of this file guessed /v1/cricket/matches etc. from the
+// cricket-api marketing page — that shape doesn't match the real docs and
+// has been replaced.)
+const BIGBALLS_BASE = 'https://api.bigballsdata.com';
+const BIGBALLS_PATH_BUILDERS = {
+  sports: () => '/v1/sports',
+  matches: () => '/v1/matches',
+  match: (id) => `/v1/matches/${encodeURIComponent(id)}`,
+  players: () => '/v1/players',
+  player: (id) => `/v1/players/${encodeURIComponent(id)}`,
+  teams: () => '/v1/teams',
+  team: (id) => `/v1/teams/${encodeURIComponent(id)}`
+};
+// Query params the front-end is allowed to pass straight through to Big
+// Balls (besides provider/endpoint/id, which this function consumes itself).
+const BIGBALLS_PASSTHROUGH_PARAMS = ['sport', 'league', 'status', 'limit', 'page', 'fields', 'name'];
 
 async function proxyJSON(upstream, headers, cacheSeconds){
   const res = await fetch(upstream, { headers: Object.assign({ accept: 'application/json' }, headers || {}) });
@@ -46,13 +68,23 @@ exports.handler = async (event) => {
       return await proxyJSON(url, null, 20);
     }
 
-    if(provider === 'cricbuzz'){
-      const apiKey = process.env.CRICBUZZ_KEY;
-      if(!apiKey) return { statusCode: 501, body: JSON.stringify({ error: 'CRICBUZZ_KEY not set' }) };
-      const path = CRICBUZZ_PATHS[params.endpoint];
-      if(!path) return { statusCode: 400, body: JSON.stringify({ error: 'Invalid endpoint' }) };
-      const url = `https://${CRICBUZZ_HOST}${path}`;
-      return await proxyJSON(url, { 'X-RapidAPI-Key': apiKey, 'X-RapidAPI-Host': CRICBUZZ_HOST }, 20);
+    if(provider === 'bigballs'){
+      const apiKey = process.env.BIGBALLS_KEY;
+      if(!apiKey) return { statusCode: 501, body: JSON.stringify({ error: 'BIGBALLS_KEY not set' }) };
+      const builder = BIGBALLS_PATH_BUILDERS[params.endpoint];
+      if(!builder) return { statusCode: 400, body: JSON.stringify({ error: 'Invalid endpoint' }) };
+      // matches/:id, players/:id and teams/:id all need an id
+      const needsId = params.endpoint === 'match' || params.endpoint === 'player' || params.endpoint === 'team';
+      if(needsId && !params.id) return { statusCode: 400, body: JSON.stringify({ error: 'Missing id' }) };
+      const path = builder(params.id);
+      const qs = new URLSearchParams();
+      BIGBALLS_PASSTHROUGH_PARAMS.forEach(key => { if(params[key] != null) qs.set(key, params[key]); });
+      const query = qs.toString();
+      const url = `${BIGBALLS_BASE}${path}${query ? `?${query}` : ''}`;
+      // live-ish data (matches list) cached briefly; sports/players/teams
+      // change less often so a slightly longer cache is fine.
+      const cacheSeconds = params.endpoint === 'matches' ? 20 : 60;
+      return await proxyJSON(url, { Authorization: `Bearer ${apiKey}` }, cacheSeconds);
     }
 
     if(provider === 'newsdata'){
@@ -84,7 +116,7 @@ exports.handler = async (event) => {
       return await proxyJSON(url, null, 300);
     }
 
-    return { statusCode: 400, body: JSON.stringify({ error: 'Invalid or missing provider. Use provider=cricapi|cricbuzz|newsdata|youtube.' }) };
+    return { statusCode: 400, body: JSON.stringify({ error: 'Invalid or missing provider. Use provider=cricapi|bigballs|newsdata|youtube.' }) };
   }catch(err){
     return { statusCode: 502, body: JSON.stringify({ error: 'Upstream request failed', detail: String(err) }) };
   }
